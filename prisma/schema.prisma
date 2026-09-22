@@ -1,0 +1,220 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Singleton owner ----------
+model OwnerProfile {
+  id                 String   @id @default("owner")
+  email              String   @unique
+  passwordHash       String
+  timezone           String   @default("Asia/Bangkok")
+  heightCm           Float?
+  baselineWeightKg   Float?
+  baselineWeightNote String? // e.g. "Previously self-reported; measurement date is unknown"
+  goalText           String?
+  initialMilestoneKg Float?
+  planningHorizonWeeks Int?
+  calorieTargetKcal  Int?
+  proteinTargetG     Int?
+  weightChangeRefLow Float? // kg/week
+  weightChangeRefHigh Float?
+  units              String   @default("kg,cm,minutes")
+  programStartDate   String? // local YYYY-MM-DD, set at first-run
+  notificationPrivacy String @default("detailed") // "detailed" | "generic"
+  priorLoadReferenceNotes String? // clearly-labeled unverified prior load references only
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+// ---------- Program definition ----------
+model ProgramVersion {
+  id             String   @id @default(cuid())
+  versionNumber  Int
+  effectiveDate  String   // local YYYY-MM-DD this version applies from
+  planningHorizonWeeks Int?
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  templates      WorkoutTemplate[]
+  occurrences    ScheduledOccurrence[]
+
+  @@unique([versionNumber])
+}
+
+model ExerciseDefinition {
+  id           String  @id @default(cuid())
+  key          String  @unique // stable machine key, e.g. "chest_press_machine"
+  name         String
+  loadBasis    String  // "MACHINE_STACK" | "DUMBBELL_PER_HAND" | "DUMBBELL_TOTAL" | "BODYWEIGHT" | "BODYWEIGHT_PLUS_LOAD"
+  repStyle     String  // "REPS" | "REPS_PER_SIDE" | "DURATION_SECONDS"
+  cues         String?
+  defaultIncrementKg Float? // editable equipment increment; null = unknown, no auto-suggestion
+  equipmentLabel String? // e.g. "Gym machine A" - editable, identifies specific equipment for comparability
+
+  templateExercises TemplateExercise[]
+  sets              ExerciseSet[]
+}
+
+model WorkoutTemplate {
+  id              String   @id @default(cuid())
+  programVersionId String
+  programVersion  ProgramVersion @relation(fields: [programVersionId], references: [id])
+  dayNumber       Int      // 1-7
+  dayLabel        String   // "Upper A", "Lower A", "Cardio/recovery", ...
+  dayType         String   // "STRENGTH" | "CARDIO_RECOVERY" | "OPTIONAL_RECOVERY" | "REST"
+  plannedCardioMinutesLow  Int?
+  plannedCardioMinutesHigh Int?
+  cardioMandatory Boolean  @default(false)
+
+  templateExercises TemplateExercise[]
+  occurrences        ScheduledOccurrence[]
+
+  @@unique([programVersionId, dayNumber])
+}
+
+model TemplateExercise {
+  id                String  @id @default(cuid())
+  workoutTemplateId String
+  workoutTemplate   WorkoutTemplate @relation(fields: [workoutTemplateId], references: [id])
+  exerciseDefinitionId String
+  exerciseDefinition   ExerciseDefinition @relation(fields: [exerciseDefinitionId], references: [id])
+  orderIndex        Int
+  workingSets       Int
+  targetRepsLow     Int?
+  targetRepsHigh    Int?
+  targetSecondsLow  Int?
+  targetSecondsHigh Int?
+  restSeconds       Int      @default(120)
+}
+
+// ---------- Calendar ----------
+model ScheduledOccurrence {
+  id               String   @id @default(cuid())
+  programVersionId String
+  programVersion   ProgramVersion @relation(fields: [programVersionId], references: [id])
+  workoutTemplateId String
+  workoutTemplate  WorkoutTemplate @relation(fields: [workoutTemplateId], references: [id])
+  originalDate     String   // YYYY-MM-DD
+  currentDate      String   // YYYY-MM-DD (after reschedule)
+  status           String   @default("SCHEDULED") // SCHEDULED | RESCHEDULED | SKIPPED
+  rescheduleHistory String  @default("[]") // JSON array of {from, to, at, reason}
+  createdAt        DateTime @default(now())
+
+  session          WorkoutSession?
+  cardioLog        CardioLog?
+
+  @@unique([currentDate])
+}
+
+model WorkoutSession {
+  id            String   @id @default(cuid())
+  occurrenceId  String   @unique
+  occurrence    ScheduledOccurrence @relation(fields: [occurrenceId], references: [id])
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  status        String   @default("NOT_STARTED") // NOT_STARTED | IN_PROGRESS | COMPLETED | PARTIAL
+  notes         String?
+  version       Int      @default(1)
+
+  sets          ExerciseSet[]
+}
+
+model ExerciseSet {
+  id              String  @id @default(cuid())
+  clientId        String  @unique // client-generated idempotency key
+  sessionId       String
+  session         WorkoutSession @relation(fields: [sessionId], references: [id])
+  exerciseDefinitionId String
+  exerciseDefinition   ExerciseDefinition @relation(fields: [exerciseDefinitionId], references: [id])
+  setIndex        Int
+  side            String? // "left" | "right" | null
+  equipmentKey    String? // snapshot of equipment label used
+  actualWeightKg  Float?
+  actualReps      Int?
+  actualSeconds   Int?
+  rir             Int?
+  isWarmup        Boolean @default(false)
+  status          String  @default("planned") // planned | completed | skipped
+  painFlag        Boolean @default(false)
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ---------- Daily logs ----------
+model DailyLog {
+  id         String  @id @default(cuid())
+  localDate  String  @unique
+  weightKg   Float?
+  waistCm    Float?
+  calories   Int?
+  proteinG   Int?
+  notes      String?
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+}
+
+model CardioLog {
+  id             String  @id @default(cuid())
+  occurrenceId   String? @unique
+  occurrence     ScheduledOccurrence? @relation(fields: [occurrenceId], references: [id])
+  localDate      String
+  mode           String  // "cycling" | "elliptical" | "other"
+  actualMinutes  Int?
+  effort         Int? // optional RPE-like 1-10
+  createdAt      DateTime @default(now())
+}
+
+// ---------- Reminders ----------
+model ReminderRule {
+  id         String  @id @default(cuid())
+  type       String  // "morning_preview" | "evening_unfinished" | "weight_reminder" | "weekly_review"
+  localTime  String  // "HH:MM"
+  activeDays String  @default("1,2,3,4,5,6,7") // comma list
+  enabled    Boolean @default(false)
+  privacy    String  @default("detailed") // "detailed" | "generic"
+  snoozedUntil String?
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+}
+
+model NotificationOutbox {
+  id            String  @id @default(cuid())
+  logicalKey    String  @unique // owner + localDate + ruleType
+  ruleType      String
+  localDate     String
+  scheduledFor  DateTime
+  expiresAt     DateTime
+  status        String  @default("queued") // queued | processing | sent | failed | expired
+  attemptCount  Int     @default(0)
+  lastError     String?
+  createdAt     DateTime @default(now())
+
+  deliveries    NotificationDelivery[]
+}
+
+model NotificationDelivery {
+  id             String  @id @default(cuid())
+  outboxId       String
+  outbox         NotificationOutbox @relation(fields: [outboxId], references: [id])
+  pushSubscriptionId String
+  status         String  @default("queued") // queued | processing | accepted | failed | expired
+  attemptCount   Int     @default(0)
+  lastError      String?
+  updatedAt      DateTime @updatedAt
+
+  @@unique([outboxId, pushSubscriptionId])
+}
