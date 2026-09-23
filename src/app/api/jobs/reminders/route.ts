@@ -10,8 +10,14 @@ import { sendWebPush } from "@/lib/push";
 const CATCH_UP_WINDOW_MS = 30 * 60 * 1000;
 
 export async function POST(req: NextRequest) {
-  const secret = req.headers.get("x-scheduler-secret");
-  if (!secret || secret !== process.env.SCHEDULER_SECRET) {
+  // Accept either a custom header (used by scripts/scheduler.ts and
+  // third-party callers like cron-job.org) or Vercel Cron's own
+  // `Authorization: Bearer <secret>` convention, since vercel.json crons
+  // cannot set arbitrary headers.
+  const headerSecret = req.headers.get("x-scheduler-secret");
+  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+  const providedSecret = headerSecret ?? bearer;
+  if (!providedSecret || providedSecret !== process.env.SCHEDULER_SECRET) {
     return jsonError(401, "Unauthorized");
   }
 

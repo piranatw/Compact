@@ -3,15 +3,15 @@
 Private, mobile-first strength and fat-loss log for a single owner. Built with
 Next.js (App Router, TypeScript), Prisma, and standards-based Web Push.
 
-This implementation targets the same architecture as the brief (Next.js +
-Supabase Postgres/Auth + Supabase Cron), but runs **fully locally** for now:
-SQLite instead of Supabase Postgres, and a local `node-cron` scheduler instead
-of Supabase Cron. See "Moving to Supabase / production hosting" below for what
-changes.
+This implementation targets the same architecture as the brief: Next.js +
+Postgres (Supabase's free tier) + Web Push. The one piece still standing in
+for its production equivalent is the reminders cron: locally (and until you
+wire up a hosted cron) it's driven by a `node-cron` script instead of Supabase
+Cron. See "Deploying (free)" below.
 
 ## What's real vs. simulated
 
-Everything in this app is a real, working feature against the local database —
+Everything in this app is a real, working feature against a real database —
 there are no mocked screens or fabricated demo data:
 
 - Auth is a real signed session cookie (JWT) checked on every page (`src/proxy.ts`)
@@ -32,11 +32,15 @@ there are no mocked screens or fabricated demo data:
 
 ## First-time setup
 
+You need a free Supabase Postgres database first — see "Deploying (free)"
+below if you don't have one yet, then:
+
 ```bash
 npm install
 cp .env.example .env
-# edit .env: set OWNER_EMAIL / OWNER_PASSWORD, generate SESSION_SECRET and
-# SCHEDULER_SECRET, and generate a VAPID keypair (see .env.example)
+# edit .env: DATABASE_URL + DIRECT_URL from your Supabase project, plus
+# OWNER_EMAIL / OWNER_PASSWORD, a SESSION_SECRET, a SCHEDULER_SECRET, and a
+# VAPID keypair (see .env.example for how to generate each)
 npx prisma migrate deploy   # or: npx prisma migrate dev
 npm run seed                # creates the one owner account + starter program
 npm run dev
@@ -98,8 +102,13 @@ automation against a running dev server):
   URL on a real device can confirm delivery while the app is closed.
 - **No Playwright/E2E suite yet** — only Vitest unit tests for the
   deterministic logic, plus the manual browser pass above.
-- **Supabase is not wired up.** This runs on SQLite + a local scheduler. See
-  below for the migration path.
+- **Supabase Cron is not wired up yet** — the app runs against real Supabase
+  Postgres, but reminders are still driven by the local `node-cron` script
+  until you point a hosted cron at `/api/jobs/reminders` (see below).
+- **No Postgres RLS policies yet.** Ownership is enforced at the application
+  layer (every route checks the session via `requireOwnerId()`), which is
+  sufficient as long as only this app's server talks to the database. Add RLS
+  before ever using the Supabase anon/browser client directly.
 - **Reschedule/skip controls only appear for occurrences that already exist**
   (today or the past, or a date you've already interacted with) — future days
   don't get a database row until they're reached, so there's nothing to
@@ -108,38 +117,79 @@ automation against a running dev server):
 - Progress charts are a minimal bar chart + accessible `<table>` fallback, not
   a full charting library.
 
-## Moving to Supabase / production hosting
+## Deploying (free)
 
-1. Create a Supabase project. In **Auth → Providers**, disable new-user and
-   anonymous sign-ups (there is no registration UI in this app anyway, but the
-   backend should refuse it too).
-2. Swap the Prisma datasource in `prisma/schema.prisma` from `sqlite` to
-   `postgresql`, point `DATABASE_URL` at the Supabase connection string, and
-   re-run migrations.
-3. Add Postgres RLS policies scoping every table to the single owner row (the
-   app currently enforces ownership at the application layer via the session
-   cookie + `requireOwnerId()`; RLS should be added as defense in depth before
-   using the Supabase anon/browser client directly for anything).
-4. Deploy to an HTTPS-capable Next.js host. Set all `.env.example` variables as
-   real secrets in that host's environment config — **never** commit them.
-5. Replace `npm run scheduler` with Supabase Cron (or the host's equivalent)
-   calling `POST https://<your-domain>/api/jobs/reminders` every 5 minutes with
-   header `x-scheduler-secret: <SCHEDULER_SECRET>`.
-6. Regenerate a production VAPID keypair — don't reuse the one generated for
-   local dev.
-7. On an iPhone: install the app to the Home Screen, open it there (not a
-   regular Safari tab), grant notification permission from the Settings page's
-   "Enable notifications" button, and use "Send test" to confirm delivery
-   while the app is closed.
+Two free services, wired together: **Supabase** for Postgres, **Vercel** for
+hosting. Both have generous free tiers with no credit card required for this
+app's scale (one user, small tables).
+
+### 1. Database — Supabase free tier
+
+1. Create a project at supabase.com (free tier: 500 MB database, pauses after
+   a week of inactivity — it wakes back up on the next request, just slowly).
+2. In **Auth → Providers**, disable new-user and anonymous sign-ups (this app
+   has no registration UI anyway, but the backend should refuse it too).
+3. Go to **Project Settings → Database → Connection string**. Copy two URIs:
+   - **Transaction pooler** (port 6543) → this is `DATABASE_URL`. Append
+     `?pgbouncer=true` if it isn't already there.
+   - **Direct connection** (port 5432) → this is `DIRECT_URL`, used only for
+     running migrations.
+4. Locally: put both into `.env`, then run:
+   ```bash
+   npx prisma migrate deploy
+   npm run seed
+   ```
+   This creates the schema and your one owner account directly on Supabase —
+   from then on, local dev and production point at the same database unless
+   you deliberately create a second Supabase project for dev.
+
+### 2. Hosting — Vercel free tier
+
+1. Import the GitHub repo into Vercel (already connected, since that's the
+   deployment that failed). Framework preset: Next.js — no changes needed.
+2. In **Project Settings → Environment Variables**, add every variable from
+   `.env.example` with real values: `DATABASE_URL`, `DIRECT_URL`,
+   `SESSION_SECRET`, `OWNER_EMAIL`, `OWNER_PASSWORD`, `SCHEDULER_SECRET`,
+   `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`,
+   `NEXT_PUBLIC_VAPID_PUBLIC_KEY`. Generate a fresh VAPID keypair for
+   production — don't reuse the one from local dev:
+   ```bash
+   node -e "console.log(require('web-push').generateVAPIDKeys())"
+   ```
+3. Redeploy. The `postinstall` script now runs `prisma generate` automatically
+   as part of Vercel's build (this — plus SQLite — is why the first deploy
+   failed: the Prisma client was never generated on Vercel's build machine).
+4. On your phone: open the deployed HTTPS URL, "Add to Home Screen", open it
+   from there, then Settings → "Enable notifications" → "Send test" to confirm
+   push works while the app is closed.
+
+### 3. Reminders cron — free options
+
+Supabase Cron requires a paid compute add-on. Two free alternatives that call
+the same endpoint on the same 5-minute contract:
+
+- **cron-job.org** (free): a scheduled job that does
+  `POST https://<your-vercel-domain>/api/jobs/reminders` every 5 minutes with
+  header `x-scheduler-secret: <SCHEDULER_SECRET>`.
+- **Vercel Cron** (included `vercel.json`, runs hourly on the free tier — the
+  free plan doesn't allow every-5-minutes, so reminders land within the hour
+  rather than within 5 minutes). Vercel auto-attaches
+  `Authorization: Bearer <CRON_SECRET>` to cron requests, so set a
+  `CRON_SECRET` env var in Vercel equal to the same value as
+  `SCHEDULER_SECRET` — the endpoint accepts either that or the custom header.
+
+Until one of these is set up, reminders simply won't fire in production —
+everything else (Today/Plan/Progress/Settings, logging, export) works fully
+without it.
 
 ## Data export / backup
 
 Settings → Data export gives a full JSON export (all tables, schema-versioned)
 and per-table CSV exports (daily logs, cardio logs, exercise sets). CSV cells
 are escaped against spreadsheet formula injection. There is no automated
-off-device backup job in this delivery — for SQLite, back up `prisma/dev.db`
-directly; for Postgres/Supabase, use Supabase's own backup/restore tooling and
-actually test a restore before relying on it.
+off-device backup job in this delivery — use Supabase's own backup/restore
+tooling (Project Settings → Database → Backups) and actually test a restore
+before relying on it; the free tier keeps daily backups for 7 days.
 
 ## Reset
 
